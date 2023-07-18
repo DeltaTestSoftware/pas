@@ -1,20 +1,22 @@
-package pas
+package pas_test
 
 import (
 	"strings"
 	"testing"
 
 	"github.com/gonutz/check"
+
+	"github.com/DeltaTestSoftware/pas"
 )
 
 func TestTokenize(t *testing.T) {
-	checkTokenize := func(code string, want []Token, wantSuccess bool) {
+	checkTokenize := func(code string, want []pas.Token, wantSuccess bool) {
 		t.Helper()
 
 		// We always expect and EOF at the last position after the code.
 		want = append(want, endOfFile(len(code)))
 
-		have, err := TokenizeString(code)
+		have, err := pas.TokenizeString(code)
 		if wantSuccess {
 			check.Eq(t, err, nil)
 		} else {
@@ -29,20 +31,30 @@ func TestTokenize(t *testing.T) {
 			check.Eq(t, haveString, wantString, "token ", i)
 		}
 	}
-	tokenize := func(code string, want ...Token) {
+	tokenize := func(code string, want ...pas.Token) {
 		t.Helper()
 		checkTokenize(code, want, true)
 	}
-	fail := func(code string, want ...Token) {
+	fail := func(code string, want ...pas.Token) {
 		t.Helper()
 		checkTokenize(code, want, false)
 	}
+	utf8 := string([]byte{0xEF, 0xBB, 0xBF})
 
 	tokenize("")
 	tokenize(" ", space(0))
 	tokenize(" \r\n\t", space(0))
 	tokenize("// comment", comment(0))
 	tokenize(" //", space(0), comment(1))
+	tokenize("{}", comment(0))
+	tokenize("{{}", comment(0))
+	tokenize("{\r\n}", comment(0))
+	fail("{", comment(0))
+	tokenize("(**)", comment(0))
+	tokenize("(*** )*)x", comment(0), word(8))
+	tokenize("(* \t\r\n *)", comment(0))
+	tokenize("(***)", comment(0))
+	fail("(** )", comment(0))
 	fail(`"`, illegal(0))
 	tokenize(
 		"a A abc ABC _123",
@@ -57,7 +69,7 @@ func TestTokenize(t *testing.T) {
 		word(12),
 	)
 	tokenize(
-		",;.:=()[]+-*/",
+		",;.:=()[]+-*/^><@",
 		symbol(0),
 		symbol(1),
 		symbol(2),
@@ -71,69 +83,114 @@ func TestTokenize(t *testing.T) {
 		symbol(10),
 		symbol(11),
 		symbol(12),
+		symbol(13),
+		symbol(14),
+		symbol(15),
+		symbol(16),
+	)
+	tokenize(
+		"<> < > <>",
+		uneq(0),
+		space(2),
+		symbol(3),
+		space(4),
+		symbol(5),
+		space(6),
+		uneq(7),
 	)
 	tokenize(`''`, stringLiteral(0))
 	tokenize(`'abc'`, stringLiteral(0))
 	tokenize(`'' ''`, stringLiteral(0), space(2), stringLiteral(3))
-	tokenize(` 'ä' `, space(0), stringLiteral(1), space(5)) // ä is 2 bytes.
+	tokenize(
+		utf8+` 'ä' `,
+		utf8bom(),
+		space(3),
+		stringLiteral(4), // ä is 2 bytes.
+		space(8),
+	)
 	tokenize(` '''' `, space(0), stringLiteral(1), space(5))
 	tokenize(` 'quote '' is escaped'`, space(0), stringLiteral(1))
 	fail(`'`, stringLiteral(0))
-	tokenize("#13#10", character(0), character(3))
-	fail("#", illegal(0))
-	fail("##x", illegal(0), illegal(1), word(2))
 	tokenize("1 23 456", number(0), space(1), number(2), space(4), number(5))
+	tokenize("$12 $ab $EF", number(0), space(3), number(4), space(7), number(8))
+	fail("$", illegal(0))
+	fail("$ ", illegal(0), space(1))
+	fail("$x", illegal(0), word(1))
+	tokenize("#13#10", character(0), character(3))
+	tokenize(
+		"#$10 #$a #$A",
+		character(0),
+		space(4),
+		character(5),
+		space(8),
+		character(9),
+	)
+	fail("#", illegal(0))
+	fail("# ", illegal(0), space(1))
+	fail("##x", illegal(0), illegal(1), word(2))
+	fail("#$", illegal(0))
+	fail("#$ ", illegal(0), space(2))
+	fail("##$x", illegal(0), illegal(1), word(3))
 	bom := string([]byte{0xEF, 0xBB, 0xBF})
 	tokenize(bom, utf8bom())
 	tokenize(bom+" UTF8", utf8bom(), space(3), word(4))
+	fail("&", word(0))
+	fail("& ", word(0), space(1))
+	tokenize("&begin 9", word(0), space(6), number(7))
+	tokenize("&&begin 9", word(0), space(7), number(8))
+	fail("&&9", word(0), number(2))
 }
 
-func endOfFile(offset int) Token {
-	return Token{Type: EOF, Offset: offset}
+func endOfFile(offset int) pas.Token {
+	return pas.Token{Type: pas.EOF, Offset: offset}
 }
 
-func illegal(offset int) Token {
-	return Token{Type: IllegalCharacter, Offset: offset}
+func illegal(offset int) pas.Token {
+	return pas.Token{Type: pas.IllegalCharacter, Offset: offset}
 }
 
-func comment(offset int) Token {
-	return Token{Type: Comment, Offset: offset}
+func comment(offset int) pas.Token {
+	return pas.Token{Type: pas.Comment, Offset: offset}
 }
 
-func space(offset int) Token {
-	return Token{Type: WhiteSpace, Offset: offset}
+func space(offset int) pas.Token {
+	return pas.Token{Type: pas.WhiteSpace, Offset: offset}
 }
 
-func word(offset int) Token {
-	return Token{Type: Word, Offset: offset}
+func word(offset int) pas.Token {
+	return pas.Token{Type: pas.Word, Offset: offset}
 }
 
-func symbol(offset int) Token {
-	return Token{Type: Symbol, Offset: offset}
+func symbol(offset int) pas.Token {
+	return pas.Token{Type: pas.Symbol, Offset: offset}
 }
 
-func stringLiteral(offset int) Token {
-	return Token{Type: String, Offset: offset}
+func stringLiteral(offset int) pas.Token {
+	return pas.Token{Type: pas.String, Offset: offset}
 }
 
-func character(offset int) Token {
-	return Token{Type: Character, Offset: offset}
+func character(offset int) pas.Token {
+	return pas.Token{Type: pas.Character, Offset: offset}
 }
 
-func number(offset int) Token {
-	return Token{Type: Number, Offset: offset}
+func number(offset int) pas.Token {
+	return pas.Token{Type: pas.Number, Offset: offset}
 }
 
-func utf8bom() Token {
+func utf8bom() pas.Token {
 	// The BOM always comes first, hence offset 0.
-	return Token{Type: UTF8BOM, Offset: 0}
+	return pas.Token{Type: pas.UTF8BOM, Offset: 0}
+}
+
+func uneq(offset int) pas.Token {
+	return pas.Token{Type: pas.Unequal, Offset: offset}
 }
 
 func TestTokenizeErrors(t *testing.T) {
 	failTokenize := func(code, wantErrorStart string) {
 		t.Helper()
 
-		_, err := TokenizeString(code)
+		_, err := pas.TokenizeString(code)
 		if err == nil {
 			t.Fatal("no error")
 		}
@@ -159,4 +216,6 @@ func TestTokenizeErrors(t *testing.T) {
 	fail("#", "1:1: ")
 	fail("\n  #", "2:3: ")
 	fail("#x", "1:1: ")
+	// Non-ASCII character in ASCII file (has no UTF-8 BOM)
+	failTokenize(string([]byte{128}), "1:1")
 }

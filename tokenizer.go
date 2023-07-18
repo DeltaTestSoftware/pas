@@ -47,22 +47,35 @@ func (t *tokenizer) next() {
 }
 
 func (t *tokenizer) tokenizeAll() {
+	if !t.checkFileFormat() {
+		return
+	}
 	t.startOrUTF8BOM()
 	for t.cur != eof {
 		if isWhiteSpace(t.cur) {
 			t.whiteSpace()
 		} else if t.cur == '/' {
 			t.divisionOrLineComment()
-		} else if unicode.IsLetter(t.cur) || t.cur == '_' {
+		} else if t.cur == '(' {
+			t.openParenOrMultiLineComment()
+		} else if t.cur == '{' {
+			t.multiLineComment()
+		} else if isWordStart(t.cur) {
 			t.word()
+		} else if t.cur == '&' {
+			t.escapedWord()
 		} else if unicode.IsDigit(t.cur) {
 			t.number()
+		} else if t.cur == '<' {
+			t.unequalOrLessThan()
 		} else if isSymbol(t.cur) {
 			t.symbol()
 		} else if t.cur == '\'' {
 			t.stringLiteral()
 		} else if t.cur == '#' {
 			t.character()
+		} else if t.cur == '$' {
+			t.hexNumber()
 		} else {
 			t.illegalCharacter()
 		}
@@ -70,9 +83,25 @@ func (t *tokenizer) tokenizeAll() {
 	t.eof()
 }
 
+var utf8bom = []byte{0xEF, 0xBB, 0xBF}
+
+func (t *tokenizer) checkFileFormat() bool {
+	isUTF8 := bytes.HasPrefix(t.code, utf8bom)
+	isAscii := !isUTF8
+	if isAscii {
+		for i, b := range t.code {
+			if b >= 128 {
+				t.failAtf(i, "illegal character code(%d) in ASCII file "+
+					"(please use UTF-8 encoding instead)", b)
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (t *tokenizer) startOrUTF8BOM() {
-	bom := []byte{0xEF, 0xBB, 0xBF}
-	if bytes.HasPrefix(t.code, bom) {
+	if bytes.HasPrefix(t.code, utf8bom) {
 		t.bomSize = 3
 		t.next()
 		t.next()
@@ -98,9 +127,29 @@ func (t *tokenizer) whiteSpace() {
 	t.emit(WhiteSpace)
 }
 
+func isWordStart(r rune) bool {
+	return unicode.IsLetter(r) || r == '_'
+}
+
 func (t *tokenizer) word() {
 	for unicode.IsLetter(t.cur) || unicode.IsDigit(t.cur) || t.cur == '_' {
 		t.next()
+	}
+	t.emit(Word)
+}
+
+func (t *tokenizer) escapedWord() {
+	t.next() // Skip '&'.
+	for t.cur == '&' {
+		t.next()
+	}
+	if isWordStart(t.cur) {
+		t.next()
+		for unicode.IsLetter(t.cur) || unicode.IsDigit(t.cur) || t.cur == '_' {
+			t.next()
+		}
+	} else {
+		t.failf("invalid word after ampersand")
 	}
 	t.emit(Word)
 }
@@ -114,7 +163,17 @@ func (t *tokenizer) number() {
 }
 
 func isSymbol(r rune) bool {
-	return strings.ContainsRune(",;.:=()[]+-*/", r)
+	return strings.ContainsRune(",;.:=()[]+-*/^><@", r)
+}
+
+func (t *tokenizer) unequalOrLessThan() {
+	t.next()
+	if t.cur == '>' {
+		t.next()
+		t.emit(Unequal)
+	} else {
+		t.emit(Symbol)
+	}
 }
 
 func (t *tokenizer) symbol() {
@@ -144,9 +203,14 @@ func (t *tokenizer) stringLiteral() {
 
 func (t *tokenizer) character() {
 	t.next() // Skip '#'.
-	if unicode.IsDigit(t.cur) {
+	validNumber := unicode.IsDigit
+	if t.cur == '$' {
+		t.next() // Skip '$'.
+		validNumber = isHexDigit
+	}
+	if validNumber(t.cur) {
 		t.next()
-		for unicode.IsDigit(t.cur) {
+		for validNumber(t.cur) {
 			t.next()
 		}
 		t.emit(Character)
@@ -156,6 +220,28 @@ func (t *tokenizer) character() {
 		}
 		t.emit(IllegalCharacter)
 	}
+}
+
+func (t *tokenizer) hexNumber() {
+	t.next() // Skip '$'.
+	if isHexDigit(t.cur) {
+		t.next()
+		for isHexDigit(t.cur) {
+			t.next()
+		}
+		t.emit(Number)
+	} else {
+		if t.err == nil {
+			t.failf("missing hex digit in hex number")
+		}
+		t.emit(IllegalCharacter)
+	}
+}
+
+func isHexDigit(r rune) bool {
+	return unicode.IsDigit(r) ||
+		'a' <= r && r <= 'f' ||
+		'A' <= r && r <= 'F'
 }
 
 func (t *tokenizer) illegalCharacter() {
@@ -169,14 +255,18 @@ func (t *tokenizer) illegalCharacter() {
 }
 
 func (t *tokenizer) failf(format string, a ...any) {
-	line, col := t.startPosition()
+	t.failAtf(t.start, format, a...)
+}
+
+func (t *tokenizer) failAtf(offset int, format string, a ...any) {
+	line, col := t.positionAtOffset(offset)
 	t.err = fmt.Errorf("%d:%d: %s", line, col, fmt.Sprintf(format, a...))
 }
 
-// startPosition converts the current value of the offset t.start into line and
-// column numbers, both starting at 1.
-func (t *tokenizer) startPosition() (line, col int) {
-	prefix := t.code[:t.start]
+// positionAtOffset converts the given offset to line and column numbers, both
+// starting at 1.
+func (t *tokenizer) positionAtOffset(offset int) (line, col int) {
+	prefix := t.code[:offset]
 	line = 1 + bytes.Count(prefix, []byte{'\n'})
 	// Note that this works on the first line, because bytes.LastIndexByte
 	// returns -1 in that case.
@@ -201,6 +291,38 @@ func (t *tokenizer) lineComment() {
 	for !(t.cur == '\n' || t.cur == eof) {
 		t.next()
 	}
+	t.emit(Comment)
+}
+
+func (t *tokenizer) openParenOrMultiLineComment() {
+	t.next() // Skip opening '('.
+	if t.cur == '*' {
+		t.next() // Skip '*'.
+		lastWasClosingStar := false
+		for t.cur != eof {
+			if lastWasClosingStar && t.cur == ')' {
+				t.next() // Skip closing ')'.
+				t.emit(Comment)
+				return
+			}
+			lastWasClosingStar = t.cur == '*'
+			t.next()
+		}
+		t.failf("unclosed comment")
+		t.emit(Comment)
+	} else {
+		t.emit(Symbol)
+	}
+}
+
+func (t *tokenizer) multiLineComment() {
+	for !(t.cur == '}' || t.cur == eof) {
+		t.next()
+	}
+	if t.cur == eof {
+		t.failf("unclosed comment")
+	}
+	t.next() // Skip closing '}'.
 	t.emit(Comment)
 }
 
@@ -230,6 +352,7 @@ const (
 	String
 	Character
 	Number
+	Unequal
 )
 
 func (t TokenType) String() string {
@@ -254,6 +377,8 @@ func (t TokenType) String() string {
 		return "Character"
 	case Number:
 		return "Number"
+	case Unequal:
+		return "Unequal"
 	}
 	return fmt.Sprintf("unknown TokenType(%d)", int(t))
 }
