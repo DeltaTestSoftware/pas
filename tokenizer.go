@@ -16,6 +16,27 @@ func TokenizeString(code string) ([]Token, error) {
 	return tokenize([]byte(code))
 }
 
+type Token struct {
+	Type   TokenType
+	Offset int // Byte offset into the code.
+}
+
+type TokenType int
+
+const (
+	EOF TokenType = iota
+	IllegalCharacter
+	UTF8BOM
+	WhiteSpace
+	Comment
+	Word      // E.g. Count, I, begin, procedure
+	Symbol    // Single letters like ; , + -
+	String    // Unescaped and in single quotes, e.g. 'this is a ''string''.'
+	Character // E.g. #13 #$D but NOT single-letter strings like 'A'.
+	Number    // E.g. 5, 123, -89, $FF00
+	Unequal   // Operator <>
+)
+
 func tokenize(code []byte) ([]Token, error) {
 	t := newTokenizer(code)
 	t.tokenizeAll()
@@ -330,30 +351,9 @@ func (t *tokenizer) eof() {
 	t.emit(EOF)
 }
 
-type Token struct {
-	Type   TokenType
-	Offset int // Byte offset into the code.
-}
-
 func (t Token) String() string {
 	return fmt.Sprintf("%s at offset %d", t.Type, t.Offset)
 }
-
-type TokenType int
-
-const (
-	EOF TokenType = iota
-	IllegalCharacter
-	UTF8BOM
-	WhiteSpace
-	Comment
-	Word
-	Symbol
-	String
-	Character
-	Number
-	Unequal
-)
 
 func (t TokenType) String() string {
 	switch t {
